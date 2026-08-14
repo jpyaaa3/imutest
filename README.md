@@ -22,9 +22,17 @@ python map.py --motor-port COM5 --imu-port COM6
 single SparkFun BNO080/BNO085 CSV protocol emitted by `imu.ino`.  The GUI first
 tries GLFW/ImGui and falls back to a native Tkinter window.  `MAG ON` and
 `MAG OFF` switch the magnetometer-backed rotation vector on the Teensy;
-`IMU ON`/`IMU OFF` control the BNO sleep state.  The automatic runner accepts
-the existing `script.txt` sections (`move`, `pause`, `velocity`, `run`, `mark`,
-`cycle`, and `seqmove`).  Captures can be exported as both CSV and XLSX.
+`IMU ON`/`IMU OFF` control the BNO sleep state.  The automatic runner uses the
+included `script.txt`; `bbb_round_trip` reproduces the hard-coded `bbb.py`
+sequence (6°/354° home, 30° steps, 3-second holds).
+
+Position movement has an external P settling loop (`Kp=0.70`).  The live GUI
+and every CSV/XLSX row expose exactly one motion status: `moving`,
+`compensating`, or `stable`.  Dynamixel address 126 is recorded as `Load` in
+mA using `signed_raw * 2.69`; the signed raw value is also retained in
+`motor_load_raw`.
+
+Captures can be exported as both CSV and XLSX.
 
 ## CV tracker
 

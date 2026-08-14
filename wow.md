@@ -85,7 +85,7 @@
 
   ## 4. 설치 확인
 
-  python -c "import cv2, glfw, imgui, OpenGL, serial, dynamixel_sdk, openpyxl; print('Python dependencies OK')"
+  python -c "import cv2, glfw, OpenGL, serial, dynamixel_sdk, openpyxl; from imgui_compat import imgui; print('Python dependencies OK')"
 
   정상이라면:
 

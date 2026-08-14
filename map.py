@@ -76,28 +76,51 @@ DEFAULT_MOTOR_ID = 3
 DEFAULT_POSITION_DEG = 180.0
 DEFAULT_PROFILE_VELOCITY = 50
 POLL_PERIOD_SEC = 0.10
+P_CONTROL_PERIOD_SEC = 0.05
 REACH_TOLERANCE_DEG = 2.0
+STABLE_CONFIRM_SAMPLES = 5
+P_GAIN = 0.70
+P_COMPENSATION_BAND_DEG = 8.0
+P_MAX_CORRECTION_DEG = 8.0
+P_GOAL_UPDATE_PERIOD_SEC = 0.10
 SCENARIO_TIMEOUT_SEC = 20.0
 
-# X-series and XL430-compatible addresses.  Present Load (126) is a signed
-# 16-bit value on X-series and is also the commonly used load/current field on
-# XL430-class actuators.  Change these constants for another control table.
+MOTION_MOVING = "moving"
+MOTION_COMPENSATING = "compensating"
+MOTION_STABLE = "stable"
+MOTION_STATUSES = (MOTION_MOVING, MOTION_COMPENSATING, MOTION_STABLE)
+MOTION_STATUS_COLORS = {
+    MOTION_MOVING: (0.00, 0.00, 0.00, 1.00),
+    MOTION_COMPENSATING: (0.82, 0.55, 0.00, 1.00),
+    MOTION_STABLE: (0.05, 0.55, 0.18, 1.00),
+}
+MOTION_STATUS_TK_COLORS = {
+    MOTION_MOVING: "#000000",
+    MOTION_COMPENSATING: "#c58a00",
+    MOTION_STABLE: "#138a3d",
+}
+
+# X-series current/load address.  This project treats the signed raw value at
+# address 126 as Load and records raw * 2.69 in mA.
 ADDR_TORQUE_ENABLE = 64
 ADDR_PROFILE_VELOCITY = 112
 ADDR_GOAL_POSITION = 116
 ADDR_PRESENT_LOAD = 126
 ADDR_PRESENT_POSITION = 132
+LOAD_MA_PER_RAW = 2.69
 TORQUE_ENABLE = 1
 TORQUE_DISABLE = 0
 
-ROOT_DIR = Path(__file__).resolve().parents[1]
+ROOT_DIR = Path(__file__).resolve().parent
 DEFAULT_SCENARIO_FILE = ROOT_DIR / "script.txt"
 
 CSV_COLUMNS = [
     "timestamp_iso",
     "unix_time",
+    "status",
     "motor_position_deg",
     "motor_load",
+    "motor_load_raw",
     "imu_roll_deg",
     "imu_pitch_deg",
     "imu_yaw_deg",
@@ -325,7 +348,8 @@ class ImuSerialReader:
 @dataclass
 class MotorReading:
     position_deg: Optional[float] = None
-    load: Optional[int] = None
+    load: Optional[float] = None
+    load_raw: Optional[int] = None
     error: str = ""
 
 
@@ -350,10 +374,35 @@ class DynamixelMotorController:
         self._lock = threading.RLock()
         self.torque_enabled = False
         self.profile_velocity = 50
+        self._motion_status_lock = threading.Lock()
+        self._motion_status = MOTION_STABLE
+        self.motion_target_deg: Optional[float] = None
+        self.motion_error_deg: Optional[float] = None
 
     @property
     def connected(self) -> bool:
         return self._port is not None and self._packet is not None
+
+    @property
+    def motion_status(self) -> str:
+        with self._motion_status_lock:
+            return self._motion_status
+
+    def _set_motion_status(
+        self,
+        status: str,
+        target: Optional[float] = None,
+        error: Optional[float] = None,
+    ) -> None:
+        if status not in MOTION_STATUSES:
+            raise ValueError(f"unsupported motion status: {status}")
+        with self._motion_status_lock:
+            self._motion_status = status
+            self.motion_target_deg = target
+            self.motion_error_deg = error
+
+    def reset_motion_status(self) -> None:
+        self._set_motion_status(MOTION_STABLE)
 
     def connect(self, port_name: str) -> None:
         if dynamixel is None:
@@ -390,6 +439,7 @@ class DynamixelMotorController:
             self._port = None
             self._packet = None
             self.torque_enabled = False
+            self._set_motion_status(MOTION_STABLE)
 
     def _require_connected(self) -> None:
         if not self.connected:
@@ -442,6 +492,82 @@ class DynamixelMotorController:
             if result != dynamixel.COMM_SUCCESS or error != 0:
                 raise RuntimeError(f"cannot move motor {self.motor_id}")
 
+    def move_to_closed_loop(
+        self,
+        target: float,
+        stop_event: Optional[threading.Event] = None,
+        timeout: float = SCENARIO_TIMEOUT_SEC,
+    ) -> bool:
+        """Move with an external proportional settling loop.
+
+        Dynamixel's internal position controller handles the main movement.
+        Once the measured position enters the compensation band, this loop
+        repeatedly applies ``target + Kp * error`` and requires several
+        consecutive in-tolerance samples before declaring the pose stable.
+        """
+        target = clamp_position(target)
+        stop_event = stop_event or threading.Event()
+        started = time.monotonic()
+        stable_samples = 0
+        last_command: Optional[float] = None
+        last_command_at = 0.0
+
+        self._set_motion_status(MOTION_MOVING, target, None)
+        try:
+            self.set_position(target)
+            last_command = target
+            last_command_at = time.monotonic()
+            while not stop_event.is_set() and time.monotonic() - started < timeout:
+                reading = self.read_state()
+                position = reading.position_deg
+                if position is None:
+                    stable_samples = 0
+                    self._set_motion_status(MOTION_MOVING, target, None)
+                else:
+                    error = target - float(position)
+                    absolute_error = abs(error)
+                    if absolute_error <= REACH_TOLERANCE_DEG:
+                        stable_samples += 1
+                        self._set_motion_status(MOTION_COMPENSATING, target, error)
+                        if stable_samples >= STABLE_CONFIRM_SAMPLES:
+                            self._set_motion_status(MOTION_STABLE, target, error)
+                            return True
+                    else:
+                        stable_samples = 0
+                        if absolute_error <= P_COMPENSATION_BAND_DEG:
+                            correction = max(
+                                -P_MAX_CORRECTION_DEG,
+                                min(P_MAX_CORRECTION_DEG, P_GAIN * error),
+                            )
+                            command = clamp_position(target + correction)
+                            self._set_motion_status(MOTION_COMPENSATING, target, error)
+                        else:
+                            command = target
+                            self._set_motion_status(MOTION_MOVING, target, error)
+
+                        now = time.monotonic()
+                        command_changed = (
+                            last_command is None
+                            or abs(command - last_command) >= 0.1
+                        )
+                        if (
+                            now - last_command_at >= P_GOAL_UPDATE_PERIOD_SEC
+                            and command_changed
+                        ):
+                            self.set_position(command)
+                            last_command = command
+                            last_command_at = now
+
+                if stop_event.wait(P_CONTROL_PERIOD_SEC):
+                    break
+        except Exception as error:
+            self.on_log(f"P-control error: {error}")
+            return False
+        finally:
+            if self.motion_status != MOTION_STABLE:
+                self._set_motion_status(MOTION_STABLE, target, self.motion_error_deg)
+        return False
+
     def set_positions(self, positions: Iterable[float] | float) -> None:
         """Compatibility wrapper accepting one scalar or a one-item iterable."""
         if isinstance(positions, (int, float)):
@@ -464,12 +590,13 @@ class DynamixelMotorController:
                 if result != dynamixel.COMM_SUCCESS or error != 0:
                     reading.error = f"position read failed (id={self.motor_id})"
                     return reading
-                load, result, error = self._packet.read2ByteTxRx(
+                load_raw, result, error = self._packet.read2ByteTxRx(
                     self._port, self.motor_id, ADDR_PRESENT_LOAD
                 )
                 reading.position_deg = tick_to_degree(position)
                 if result == dynamixel.COMM_SUCCESS and error == 0:
-                    reading.load = signed16(load)
+                    reading.load_raw = signed16(load_raw)
+                    reading.load = round(reading.load_raw * LOAD_MA_PER_RAW, 2)
                 else:
                     reading.error = f"load read failed (id={self.motor_id})"
             except Exception as exc:
@@ -635,21 +762,13 @@ class ScenarioRunner:
         if self._thread is not None and self._thread.is_alive():
             self._thread.join(timeout=1.0)
         self.status = "stopped"
+        self.motor.reset_motion_status()
 
     def _wait(self, seconds: float) -> bool:
         return not self._stop.wait(max(0.0, float(seconds)))
 
     def _move_and_wait(self, target: float) -> bool:
-        self.motor.set_position(target)
-        started = time.monotonic()
-        while not self._stop.is_set() and time.monotonic() - started < SCENARIO_TIMEOUT_SEC:
-            reading = self.motor.read_state()
-            if reading.position_deg is not None:
-                if abs(float(reading.position_deg) - target) <= REACH_TOLERANCE_DEG:
-                    return True
-            if not self._wait(POLL_PERIOD_SEC):
-                return False
-        return self._stop.is_set() or False
+        return self.motor.move_to_closed_loop(target, self._stop)
 
     def _run(self, name: str, commands: list[MotionCommand]) -> None:
         last_target: Optional[float] = None
@@ -953,6 +1072,8 @@ class MapApp:
         self.imu = ImuSerialReader(self.log)
         self.motor = DynamixelMotorController(DEFAULT_MOTOR_ID, int(args.baud), self.log)
         self.runner = ScenarioRunner(self.motor, self.log)
+        self._manual_stop = threading.Event()
+        self._manual_thread: Optional[threading.Thread] = None
         self.last_sample = 0.0
         self.last_motor_error = ""
         self.last_frame_log = 0.0
@@ -1016,8 +1137,10 @@ class MapApp:
         return {
             "timestamp_iso": now_iso(),
             "unix_time": f"{time.time():.6f}",
+            "status": self.motor.motion_status,
             "motor_position_deg": self._csv_value(self.motor_reading.position_deg),
             "motor_load": self._csv_value(self.motor_reading.load),
+            "motor_load_raw": self._csv_value(self.motor_reading.load_raw),
             "imu_roll_deg": self._csv_value(imu.roll if imu.updated_at else None),
             "imu_pitch_deg": self._csv_value(imu.pitch if imu.updated_at else None),
             "imu_yaw_deg": self._csv_value(imu.yaw if imu.updated_at else None),
@@ -1032,13 +1155,14 @@ class MapApp:
         motor = self.motor_reading
         def motor_text(reading: MotorReading) -> str:
             position = "--" if reading.position_deg is None else f"{reading.position_deg:6.2f}"
-            load = "--" if reading.load is None else f"{reading.load:6d}"
-            return f"pos={position} load={load}"
+            load = "--" if reading.load is None else f"{reading.load:7.2f} mA"
+            raw = "--" if reading.load_raw is None else str(reading.load_raw)
+            return f"pos={position} load={load} raw={raw}"
         def imu_text(reading: ImuReading) -> str:
             if reading.updated_at <= 0.0:
                 return "r=-- p=-- y=--"
             return f"r={reading.roll:7.2f} p={reading.pitch:7.2f} y={reading.yaw:7.2f}"
-        return f"M(ID {DEFAULT_MOTOR_ID}) {motor_text(motor)} | IMU {imu_text(imu)}"
+        return f"M(ID {DEFAULT_MOTOR_ID}) status={self.motor.motion_status} {motor_text(motor)} | IMU {imu_text(imu)}"
 
     # ---------------------------- UI callbacks ---------------------------
     def connect_motor(self) -> None:
@@ -1052,6 +1176,9 @@ class MapApp:
 
     def disconnect_motor(self) -> None:
         self.runner.stop()
+        self._manual_stop.set()
+        if self._manual_thread is not None and self._manual_thread.is_alive():
+            self._manual_thread.join(timeout=1.0)
         self.motor.disconnect()
         self.status = "motor disconnected"
         self.log(self.status)
@@ -1071,17 +1198,40 @@ class MapApp:
 
     def send_manual_pose(self) -> None:
         try:
+            if self.runner.running:
+                raise RuntimeError("automatic movement is already running")
             value = clamp_position(self.manual_position)
-            self.motor.set_position(value)
+            if self._manual_thread is not None and self._manual_thread.is_alive():
+                raise RuntimeError("manual movement is already running")
+            self._manual_stop = threading.Event()
+            self._manual_thread = threading.Thread(
+                target=self._manual_move_worker,
+                args=(value, self._manual_stop),
+                name="manual-p-control",
+                daemon=True,
+            )
+            self._manual_thread.start()
             self.motor_position = value
-            self.status = f"manual pose sent: {value:.1f}° (Dynamixel ID {DEFAULT_MOTOR_ID})"
+            self.status = f"manual movement started: {value:.1f}° (Dynamixel ID {DEFAULT_MOTOR_ID})"
             self.log(self.status)
         except Exception as error:
             self.status = f"manual move error: {error}"
             self.log(self.status)
 
+    def _manual_move_worker(self, target: float, stop_event: threading.Event) -> None:
+        reached = self.motor.move_to_closed_loop(target, stop_event)
+        if stop_event.is_set():
+            self.status = "manual movement stopped"
+        elif reached:
+            self.status = f"manual movement stable: {target:.1f}°"
+        else:
+            self.status = f"manual movement failed: {target:.1f}°"
+        self.log(self.status)
+
     def start_scenario(self) -> None:
         try:
+            if self._manual_thread is not None and self._manual_thread.is_alive():
+                raise RuntimeError("manual movement is already running")
             self.runner.start(self.scenario_path, self.scenario_name)
             self.status = f"scenario running: {self.scenario_name}"
         except Exception as error:
@@ -1157,6 +1307,9 @@ class MapApp:
             imgui.text_disabled("One Dynamixel + one SparkFun BNO080/BNO085")
             imgui.same_line()
             imgui.text_colored(f"STATUS  {self.status}", 0.10, 0.48, 0.22, 1.0)
+            imgui.same_line()
+            motion_color = MOTION_STATUS_COLORS[self.motor.motion_status]
+            imgui.text_colored(f"MOTION  {self.motor.motion_status.upper()}", *motion_color)
             imgui.separator()
 
             available_width = max(1.0, float(imgui.get_content_region_available_width()))
@@ -1273,6 +1426,14 @@ class MapApp:
 
     def _draw_automatic(self) -> None:
         _panel_heading("Automatic movement", "script.txt scenario DSL")
+        imgui.text("External P control: Kp=%.2f  compensation band=%.1f°  stable tolerance=%.1f°" % (
+            P_GAIN, P_COMPENSATION_BAND_DEG, REACH_TOLERANCE_DEG
+        ))
+        imgui.text_colored("moving", *MOTION_STATUS_COLORS[MOTION_MOVING])
+        imgui.same_line()
+        imgui.text_colored("compensating", *MOTION_STATUS_COLORS[MOTION_COMPENSATING])
+        imgui.same_line()
+        imgui.text_colored("stable", *MOTION_STATUS_COLORS[MOTION_STABLE])
         changed, raw_path = imgui.input_text("Scenario file##scenario-path", str(self.scenario_path), 512)
         if changed:
             self.scenario_path = Path(raw_path)
@@ -1331,9 +1492,15 @@ class MapApp:
         imu = self.imu.snapshot()
         def motor_text(reading: MotorReading) -> str:
             position = "--" if reading.position_deg is None else f"{reading.position_deg:7.2f}°"
-            load = "--" if reading.load is None else f"{reading.load:6d}"
-            return f"pos {position}   load {load}"
+            load = "--" if reading.load is None else f"{reading.load:7.2f} mA"
+            raw = "--" if reading.load_raw is None else str(reading.load_raw)
+            return f"pos {position}   Load {load}   raw {raw}"
 
+        motion_status = self.motor.motion_status
+        imgui.text_colored(f"MOTION STATUS  {motion_status.upper()}", *MOTION_STATUS_COLORS[motion_status])
+        if self.motor.motion_error_deg is not None:
+            imgui.same_line()
+            imgui.text(f"error {self.motor.motion_error_deg:+.2f}°")
         def imu_text(reading: ImuReading) -> str:
             if reading.updated_at <= 0.0:
                 return "offline"
@@ -1359,6 +1526,9 @@ class MapApp:
 
     def close(self) -> None:
         self.runner.stop()
+        self._manual_stop.set()
+        if self._manual_thread is not None and self._manual_thread.is_alive():
+            self._manual_thread.join(timeout=1.0)
         self.imu.disconnect()
         self.motor.disconnect()
 
@@ -1395,6 +1565,7 @@ def run_tk_gui(app: MapApp) -> int:
     csv_path_var = tk.StringVar(value=app.recorder.path)
     xlsx_path_var = tk.StringVar(value=app.xlsx_path)
     status_var = tk.StringVar(value=app.status)
+    motion_status_var = tk.StringVar(value=app.motor.motion_status.upper())
     telemetry_var = tk.StringVar(value="waiting for samples")
     runner_var = tk.StringVar(value=app.runner.status)
     rows_var = tk.StringVar(value="Rows: 0  Recording: OFF")
@@ -1423,20 +1594,27 @@ def run_tk_gui(app: MapApp) -> int:
     def update_view() -> None:
         app.sample()
         status_var.set(app.status)
+        motion_status = app.motor.motion_status
+        motion_status_var.set(motion_status.upper())
+        motion_status_label.configure(foreground=MOTION_STATUS_TK_COLORS[motion_status])
         runner_var.set(f"Runner: {app.runner.status}")
         rows_var.set(
             f"Rows: {len(app.recorder.rows)}  Recording: {'ON' if app.recorder.recording else 'OFF'}"
         )
         motor = app.motor_reading
         position = "--" if motor.position_deg is None else f"{motor.position_deg:.2f}°"
-        load = "--" if motor.load is None else str(motor.load)
+        load = "--" if motor.load is None else f"{motor.load:.2f} mA"
+        raw_load = "--" if motor.load_raw is None else str(motor.load_raw)
         imu = app.imu.snapshot()
         if imu.updated_at <= 0.0:
             imu_text = "offline"
         else:
             mag = "ON" if imu.magnetometer else "OFF"
             imu_text = f"R {imu.roll:+.2f}°   P {imu.pitch:+.2f}°   Y {imu.yaw:+.2f}°   MAG {mag}"
-        telemetry_var.set(f"Dynamixel ID {DEFAULT_MOTOR_ID}: pos {position}  load {load}\nIMU: {imu_text}")
+        telemetry_var.set(
+            f"Dynamixel ID {DEFAULT_MOTOR_ID}: pos {position}  Load {load}  raw {raw_load}\n"
+            f"IMU: {imu_text}"
+        )
         ports_var.set(f"Detected ports: {', '.join(app.ports) if app.ports else 'none'}")
         update_log()
         if root.winfo_exists():
@@ -1522,8 +1700,9 @@ def run_tk_gui(app: MapApp) -> int:
     controls.grid(row=1, column=0, sticky="nsew", padx=(0, 10), pady=(10, 0))
     telemetry = ttk.LabelFrame(main_frame, text="Live telemetry / log", padding=10)
     telemetry.grid(row=1, column=1, sticky="nsew", pady=(10, 0))
-    telemetry.rowconfigure(2, weight=1)
+    telemetry.rowconfigure(3, weight=1)
     telemetry.columnconfigure(0, weight=1)
+    telemetry.columnconfigure(1, weight=0)
 
     def field(parent: object, row: int, label: str, variable: object, width: int = 30) -> None:
         ttk.Label(parent, text=label).grid(row=row, column=0, sticky="w", pady=3)
@@ -1663,13 +1842,21 @@ def run_tk_gui(app: MapApp) -> int:
         row=7, column=1, sticky="ew", padx=(5, 0), pady=3
     )
 
+    ttk.Label(telemetry, text="Motion status").grid(row=0, column=0, sticky="w")
+    motion_status_label = tk.Label(
+        telemetry,
+        textvariable=motion_status_var,
+        foreground=MOTION_STATUS_TK_COLORS[MOTION_STABLE],
+        font=("TkDefaultFont", 11, "bold"),
+    )
+    motion_status_label.grid(row=0, column=1, sticky="e")
     ttk.Label(telemetry, textvariable=telemetry_var, justify="left", font=("TkFixedFont", 11)).grid(
-        row=0, column=0, sticky="nw")
-    ttk.Label(telemetry, text="Serial, scenario and recorder events").grid(row=1, column=0, sticky="w", pady=(10, 4))
+        row=1, column=0, columnspan=2, sticky="nw")
+    ttk.Label(telemetry, text="Serial, scenario and recorder events").grid(row=2, column=0, columnspan=2, sticky="w", pady=(10, 4))
     log_widget = tk.Text(telemetry, height=20, wrap="none", state="disabled", font=("TkFixedFont", 9))
-    log_widget.grid(row=2, column=0, sticky="nsew")
+    log_widget.grid(row=3, column=0, sticky="nsew")
     log_scroll = ttk.Scrollbar(telemetry, orient="vertical", command=log_widget.yview)
-    log_scroll.grid(row=2, column=1, sticky="ns")
+    log_scroll.grid(row=3, column=1, sticky="ns")
     log_widget.configure(yscrollcommand=log_scroll.set)
 
     closed = False

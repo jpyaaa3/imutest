@@ -1,0 +1,74 @@
+# Scenario translation of bbb.py's hard-coded ID 3 motion sequence.
+# bbb.py uses 6/354 degree home positions, 30 degree waypoints,
+# and a 3 second hold after every measured waypoint.
+
+[bbb_upward]
+move 30
+pause 3s
+move 60
+pause 3s
+move 90
+pause 3s
+move 120
+pause 3s
+move 150
+pause 3s
+move 180
+pause 3s
+move 210
+pause 3s
+move 240
+pause 3s
+move 270
+pause 3s
+move 300
+pause 3s
+move 330
+pause 3s
+move 354
+pause 3s
+
+[bbb_downward]
+move 330
+pause 3s
+move 300
+pause 3s
+move 270
+pause 3s
+move 240
+pause 3s
+move 210
+pause 3s
+move 180
+pause 3s
+move 150
+pause 3s
+move 120
+pause 3s
+move 90
+pause 3s
+move 60
+pause 3s
+move 30
+pause 3s
+move 6
+pause 3s
+
+[bbb_round_trip]
+velocity 50
+move 6
+run bbb_upward
+run bbb_downward
+
+[bbb_round_trip_downward]
+velocity 50
+move 354
+run bbb_downward
+run bbb_upward
+
+# Names retained for the default map.py selector.
+[cycle_upward]
+run bbb_round_trip
+
+[cycle_downward]
+run bbb_round_trip_downward
