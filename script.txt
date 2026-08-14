@@ -66,9 +66,41 @@ move 354
 run bbb_downward
 run bbb_upward
 
+[bbb_round_trip_6]
+velocity 50
+move 6
+run bbb_upward
+run bbb_downward
+run bbb_upward
+run bbb_downward
+run bbb_upward
+run bbb_downward
+run bbb_upward
+run bbb_downward
+run bbb_upward
+run bbb_downward
+run bbb_upward
+run bbb_downward
+
+[bbb_round_trip_downward_6]
+velocity 50
+move 354
+run bbb_downward
+run bbb_upward
+run bbb_downward
+run bbb_upward
+run bbb_downward
+run bbb_upward
+run bbb_downward
+run bbb_upward
+run bbb_downward
+run bbb_upward
+run bbb_downward
+run bbb_upward
+
 # Names retained for the default map.py selector.
 [cycle_upward]
-run bbb_round_trip
+run bbb_round_trip_6
 
 [cycle_downward]
-run bbb_round_trip_downward
+run bbb_round_trip_downward_6
