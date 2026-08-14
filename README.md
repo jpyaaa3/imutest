@@ -3,14 +3,19 @@
 ## Install
 
 ```bash
-python3 -m venv .venv
-.venv/bin/pip install -r new/requirements.txt
+python -m venv .venv
+python -m pip install -r requirements.txt
 ```
+
+On Windows PowerShell, activate the environment with
+`.\\.venv\\Scripts\\Activate.ps1` and run `python map.py` or `python cv.py`.
+Python 3.12+ installs Dear ImGui Bundle; Python 3.14 is supported through the
+conditional dependency in `requirements.txt`.
 
 ## Mapper
 
 ```bash
-.venv/bin/python new/map.py --motor-port /dev/ttyUSB0 --imu-port /dev/ttyACM0
+python map.py --motor-port COM5 --imu-port COM6
 ```
 
 `map.py` uses Dynamixel Protocol 2.0 with one motor (ID 3), and reads the
@@ -24,7 +29,7 @@ the existing `script.txt` sections (`move`, `pause`, `velocity`, `run`, `mark`,
 ## CV tracker
 
 ```bash
-.venv/bin/python new/cv.py
+python cv.py
 ```
 
 No arguments opens a GLFW/ImGui input wizard (Tkinter fallback) for the video file, CSV output,

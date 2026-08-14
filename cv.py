@@ -38,8 +38,7 @@ if os.environ.get("DISPLAY"):
 
 try:
     import glfw
-    import imgui
-    from imgui.integrations.glfw import GlfwRenderer
+    from imgui_compat import GlfwRenderer, imgui
 except Exception as error:
     glfw = None  # type: ignore[assignment]
     imgui = None  # type: ignore[assignment]

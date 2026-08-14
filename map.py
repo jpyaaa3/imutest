@@ -57,8 +57,7 @@ try:
     if os.environ.get("DISPLAY"):
         os.environ["PYOPENGL_PLATFORM"] = "glx"
     import glfw
-    import imgui
-    from imgui.integrations.glfw import GlfwRenderer
+    from imgui_compat import GlfwRenderer, imgui
 except Exception as error:  # Importing map.py must still work headlessly.
     glfw = None  # type: ignore[assignment]
     imgui = None  # type: ignore[assignment]
