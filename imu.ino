@@ -2,7 +2,7 @@
  * Single SparkFun BNO080/BNO085 reader for Teensy
  *
  * Hardware:
- *   one sensor on Wire, SDA 18 / SCL 19, I2C address 0x4B
+ *   one sensor on Wire, SDA 17 / SCL 16, I2C address 0x4B
  *
  * Serial protocol (115200 baud, newline terminated):
  *   MAG ON       use the magnetometer-backed Rotation Vector
@@ -23,8 +23,8 @@
 
 // ------------------------- User configuration -------------------------
 #define IMU_BUS Wire
-#define IMU_SDA_PIN 18
-#define IMU_SCL_PIN 19
+#define IMU_SDA_PIN 17
+#define IMU_SCL_PIN 16
 #define IMU_ADDRESS 0x4B
 
 constexpr uint32_t SERIAL_BAUD = 115200;
@@ -192,7 +192,7 @@ void setup() {
   }
 
   Serial.println("SPARKFUN_BNO080,READY");
-  Serial.println("PINOUT,IMU1=Wire/SDA18/SCL19/ADDR0x4B");
+  Serial.println("PINOUT,IMU1=Wire/SDA17/SCL16/ADDR0x4B");
 
   IMU_BUS.begin();
   IMU_BUS.setSCL(IMU_SCL_PIN);
