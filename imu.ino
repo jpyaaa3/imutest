@@ -22,7 +22,7 @@
 #include "SparkFun_BNO080_Arduino_Library.h"
 
 // ------------------------- User configuration -------------------------
-#define IMU_BUS Wire
+#define IMU_BUS Wire1
 #define IMU_SDA_PIN 17
 #define IMU_SCL_PIN 16
 #define IMU_ADDRESS 0x4B
